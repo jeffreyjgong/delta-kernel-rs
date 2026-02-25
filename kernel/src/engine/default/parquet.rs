@@ -1485,6 +1485,185 @@ mod tests {
         }
     }
 
+    /// Test that ParquetFormatVersion::V2_12_0 produces files with V2 features:
+    /// - WriterVersion::PARQUET_2_0 in file metadata
+    /// - No dictionary encoding (RLE_DICTIONARY not used)
+    /// - INT64 physical type for timestamps (not INT96)
+    #[tokio::test]
+    async fn test_write_parquet_v2_features() {
+        use crate::parquet::basic::{Encoding, Type as PhysicalType};
+        use crate::parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let store = Arc::new(InMemory::new());
+        let parquet_handler =
+            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+
+        // Create test data with integers, strings, and timestamps
+        let num_rows = 100;
+        let int_values: Vec<i64> = (0..num_rows).map(|i| i * 100).collect();
+        let string_values: Vec<String> = (0..num_rows).map(|i| format!("value_{:05}", i)).collect();
+        let timestamp_values: Vec<i64> = (0..num_rows)
+            .map(|i| 1609459200000000i64 + i * 86400000000)
+            .collect();
+
+        let data = Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![
+                (
+                    "int_col",
+                    Arc::new(Int64Array::from(int_values)) as Arc<dyn Array>,
+                ),
+                (
+                    "string_col",
+                    Arc::new(StringArray::from(string_values)) as Arc<dyn Array>,
+                ),
+                (
+                    "timestamp_col",
+                    Arc::new(
+                        TimestampMicrosecondArray::from(timestamp_values)
+                            .with_timezone("UTC".to_string()),
+                    ) as Arc<dyn Array>,
+                ),
+            ])
+            .unwrap(),
+        ));
+
+        // Write using V2 format via the internal write_parquet method
+        let target_url = Url::parse("memory:///test_v2/").unwrap();
+        let writer_properties = Some(build_writer_properties(ParquetFormatVersion::V2_12_0));
+        let write_metadata = parquet_handler
+            .write_parquet(&target_url, data, &[], writer_properties)
+            .await
+            .unwrap();
+
+        // Read the file bytes from object store
+        let file_path = Path::from_url_path(write_metadata.file_meta.location.path()).unwrap();
+        let file_bytes = store.get(&file_path).await.unwrap().bytes().await.unwrap();
+
+        // Parse the Parquet metadata using SerializedFileReader
+        let reader = SerializedFileReader::new(bytes::Bytes::from(file_bytes.to_vec())).unwrap();
+        let metadata = reader.metadata();
+        let file_metadata = metadata.file_metadata();
+
+        // Verify writer version is PARQUET_2_0
+        assert_eq!(
+            file_metadata.version(),
+            2,
+            "File should be written with Parquet version 2"
+        );
+
+        // Verify file metadata
+        assert!(metadata.num_row_groups() > 0);
+        let row_group = metadata.row_group(0);
+
+        // Check integer column does NOT use dictionary encoding (V2 disables it)
+        let int_col_meta = row_group.column(0);
+        let int_encodings: Vec<_> = int_col_meta.encodings().collect();
+        let has_dictionary = int_encodings
+            .iter()
+            .any(|e| matches!(e, Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY));
+        assert!(
+            !has_dictionary,
+            "Integer column should NOT use dictionary encoding for V2, got: {:?}",
+            int_encodings
+        );
+
+        // Check string column does NOT use dictionary encoding
+        let string_col_meta = row_group.column(1);
+        let string_encodings: Vec<_> = string_col_meta.encodings().collect();
+        let has_dictionary = string_encodings
+            .iter()
+            .any(|e| matches!(e, Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY));
+        assert!(
+            !has_dictionary,
+            "String column should NOT use dictionary encoding for V2, got: {:?}",
+            string_encodings
+        );
+
+        // Check timestamp column uses INT64 physical type (not INT96)
+        let timestamp_col_meta = row_group.column(2);
+        assert_eq!(
+            timestamp_col_meta.column_type(),
+            PhysicalType::INT64,
+            "Timestamp column should use INT64 physical type for V2, not INT96"
+        );
+    }
+
+    /// Test that ParquetFormatVersion::V1_0_0 produces files with V1 features:
+    /// - WriterVersion::PARQUET_1_0 in file metadata
+    /// - Dictionary encoding enabled (RLE_DICTIONARY used)
+    #[tokio::test]
+    async fn test_write_parquet_v1_features() {
+        use crate::parquet::basic::Encoding;
+        use crate::parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let store = Arc::new(InMemory::new());
+        let parquet_handler =
+            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+
+        // Create test data with integers and strings
+        let num_rows = 100;
+        let int_values: Vec<i64> = (0..num_rows).map(|i| i * 100).collect();
+        let string_values: Vec<String> = (0..num_rows).map(|i| format!("value_{:05}", i)).collect();
+
+        let data = Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![
+                (
+                    "int_col",
+                    Arc::new(Int64Array::from(int_values)) as Arc<dyn Array>,
+                ),
+                (
+                    "string_col",
+                    Arc::new(StringArray::from(string_values)) as Arc<dyn Array>,
+                ),
+            ])
+            .unwrap(),
+        ));
+
+        // Write using V1 format via the internal write_parquet method
+        let target_url = Url::parse("memory:///test_v1/").unwrap();
+        let writer_properties = Some(build_writer_properties(ParquetFormatVersion::V1_0_0));
+        let write_metadata = parquet_handler
+            .write_parquet(&target_url, data, &[], writer_properties)
+            .await
+            .unwrap();
+
+        // Read the file bytes from object store
+        let file_path = Path::from_url_path(write_metadata.file_meta.location.path()).unwrap();
+        let file_bytes = store.get(&file_path).await.unwrap().bytes().await.unwrap();
+
+        // Parse the Parquet metadata
+        let reader = SerializedFileReader::new(bytes::Bytes::from(file_bytes.to_vec())).unwrap();
+        let metadata = reader.metadata();
+        let file_metadata = metadata.file_metadata();
+
+        // Verify writer version is PARQUET_1_0
+        assert_eq!(
+            file_metadata.version(),
+            1,
+            "File should be written with Parquet version 1"
+        );
+
+        let row_group = metadata.row_group(0);
+
+        // Check that columns CAN use dictionary encoding in V1 (default behavior)
+        // Note: dictionary encoding may or may not be used depending on data characteristics
+        let int_col_meta = row_group.column(0);
+        let int_encodings: Vec<_> = int_col_meta.encodings().collect();
+        let string_col_meta = row_group.column(1);
+        let string_encodings: Vec<_> = string_col_meta.encodings().collect();
+
+        // V1 should use dictionary encoding for at least one column (typical behavior)
+        let any_has_dictionary = int_encodings
+            .iter()
+            .chain(string_encodings.iter())
+            .any(|e| matches!(e, Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY));
+        assert!(
+            any_has_dictionary,
+            "V1 should use dictionary encoding for at least one column. Int encodings: {:?}, String encodings: {:?}",
+            int_encodings, string_encodings
+        );
+    }
+
     /// Test that columns are matched by field ID when column names differ.
     ///
     /// Per lib.rs:676-680, field IDs (via [`ColumnMetadataKey::ParquetFieldId`]) should take

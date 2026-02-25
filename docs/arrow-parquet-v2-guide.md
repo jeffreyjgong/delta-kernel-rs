@@ -253,10 +253,10 @@ let props = WriterProperties::builder()
 
 Delta Kernel Rust supports configuring the Parquet format version via the `delta.parquet.format.version` table property:
 
-| Property Value | Parquet Version | Features |
-|----------------|-----------------|----------|
-| `1.0.0` (default) | `PARQUET_1_0` | Maximum compatibility |
-| `2.12.0` | `PARQUET_2_0` | Delta encodings, DataPageV2, INT64 timestamps |
+| Property Value | Parquet Version | Dictionary Encoding | Page Format |
+|----------------|-----------------|---------------------|-------------|
+| `1.0.0` (default) | `PARQUET_1_0` | Enabled | DataPageV1 |
+| `2.12.0` | `PARQUET_2_0` | Disabled | DataPageV2 |
 
 ### Implementation
 
@@ -279,7 +279,9 @@ pub(crate) fn build_writer_properties(format_version: ParquetFormatVersion) -> W
             builder = builder.set_writer_version(WriterVersion::PARQUET_1_0);
         }
         ParquetFormatVersion::V2_12_0 => {
-            builder = builder.set_writer_version(WriterVersion::PARQUET_2_0);
+            builder = builder
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_dictionary_enabled(false);
         }
     }
 
@@ -301,6 +303,13 @@ engine.write_parquet(&data, &write_context, partition_values).await?;
 ### Checkpoints
 
 Checkpoint writes always use Parquet V1 (`ParquetFormatVersion::V1_0_0`) for maximum compatibility, regardless of the table property setting.
+
+### Delta Encodings
+
+Note: To use delta encodings (DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY), 
+you need to explicitly configure them per-column using `WriterPropertiesBuilder::set_column_encoding()`.
+The V2 configuration disables dictionary encoding, which is a prerequisite for using delta encodings,
+but the actual encoding selection requires additional per-column configuration.
 
 ### Considerations for Delta Tables
 

@@ -335,14 +335,14 @@ props.enable_row_tracking == Some(true) && props.row_tracking_suspended != Some(
 
 **Supported Values:**
 - `1.0.0`: Parquet V1 format (default, maximum compatibility)
-- `2.12.0`: Parquet V2 format with delta encodings, DataPageV2 headers, INT64 timestamps
+- `2.12.0`: Parquet V2 format with DataPageV2 headers, disabled dictionary encoding
 
 **Parquet Format Enum:**
 
 ```rust
 pub enum ParquetFormatVersion {
     V1_0_0,   // Parquet V1 (default)
-    V2_12_0,  // Parquet V2 with delta encodings
+    V2_12_0,  // Parquet V2
 }
 ```
 
@@ -356,12 +356,14 @@ let format_version = write_context.parquet_format_version();
 // format_version is used to configure WriterProperties for parquet-rs
 ```
 
-**V2 Features:**
+**V1 vs V2 Configuration:**
 
-When `delta.parquet.format.version` is set to `2.12.0`, the following Parquet V2 features are enabled:
-- **Delta encodings**: DELTA_BINARY_PACKED (integers), DELTA_LENGTH_BYTE_ARRAY (strings), DELTA_BYTE_ARRAY (strings)
-- **DataPageV2 headers**: Mixed V1/V2 data page headers
-- **INT64 timestamps**: Uses INT64 instead of INT96 for timestamp columns
+| Feature | V1 (`1.0.0`) | V2 (`2.12.0`) |
+|---------|--------------|---------------|
+| Writer Version | `PARQUET_1_0` | `PARQUET_2_0` |
+| Dictionary Encoding | Enabled | Disabled |
+| Page Format | DataPageV1 | DataPageV2 |
+| Timestamp Type | INT64 (arrow-rs default) | INT64 |
 
 **Note:** Checkpoint writes always use Parquet V1 format for maximum compatibility across all Delta readers.
 
