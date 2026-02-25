@@ -13,6 +13,7 @@ use crate::parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use crate::parquet::arrow::arrow_writer::ArrowWriter;
+use crate::parquet::file::properties::WriterProperties;
 use crate::parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use crate::parquet::arrow::async_writer::AsyncArrowWriter;
 use crate::parquet::arrow::async_writer::ParquetObjectWriter;
@@ -23,8 +24,10 @@ use object_store::{DynObjectStore, ObjectStore};
 use uuid::Uuid;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use super::parquet_properties::build_writer_properties;
 use super::stats::collect_stats;
 use super::UrlExt;
+use crate::table_properties::ParquetFormatVersion;
 use crate::engine::arrow_conversion::{TryFromArrow as _, TryIntoArrow as _};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{
@@ -161,6 +164,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         path: &url::Url,
         data: Box<dyn EngineData>,
         stats_columns: &[ColumnName],
+        writer_properties: Option<WriterProperties>,
     ) -> DeltaResult<DataFileMetadata> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
@@ -169,7 +173,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         let stats = collect_stats(record_batch, stats_columns)?;
 
         let mut buffer = vec![];
-        let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None)?;
+        let mut writer =
+            ArrowWriter::try_new(&mut buffer, record_batch.schema(), writer_properties)?;
         writer.write(record_batch)?;
         writer.close()?; // writer must be closed to write footer
 
@@ -210,6 +215,10 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     /// Note that the schema does not contain the dataChange column. In order to set `data_change` flag,
     /// use [`crate::transaction::Transaction::with_data_change`].
     ///
+    /// The `parquet_format_version` parameter controls the Parquet format used for writing:
+    /// - `V1_0_0`: Standard Parquet V1 format (default, maximum compatibility)
+    /// - `V2_12_0`: Parquet V2 with delta encodings, DataPageV2 headers, and INT64 timestamps
+    ///
     /// [add file metadata]: crate::transaction::Transaction::add_files_schema
     pub async fn write_parquet_file(
         &self,
@@ -217,9 +226,16 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         data: Box<dyn EngineData>,
         partition_values: HashMap<String, String>,
         stats_columns: Option<&[ColumnName]>,
+        parquet_format_version: ParquetFormatVersion,
     ) -> DeltaResult<Box<dyn EngineData>> {
+        let writer_properties = Some(build_writer_properties(parquet_format_version));
         let parquet_metadata = self
-            .write_parquet(path, data, stats_columns.unwrap_or(&[]))
+            .write_parquet(
+                path,
+                data,
+                stats_columns.unwrap_or(&[]),
+                writer_properties,
+            )
             .await?;
         parquet_metadata.as_record_batch(&partition_values)
     }
@@ -307,6 +323,9 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
     /// This implementation uses asynchronous file I/O with object_store to write the Parquet file.
     /// If a file already exists at the given location, it will be overwritten.
     ///
+    /// Note: This method always uses Parquet V1 format for maximum compatibility, as it is
+    /// primarily used for checkpoint writes which need to be readable by all Delta clients.
+    ///
     /// # Parameters
     ///
     /// - `location` - The full URL path where the Parquet file should be written
@@ -333,9 +352,13 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
             let first_arrow = ArrowEngineData::try_from_engine_data(first_batch)?;
             let first_record_batch: RecordBatch = (*first_arrow).into();
 
+            // Use V1 for checkpoints for maximum compatibility across all Delta readers
+            let writer_properties = build_writer_properties(ParquetFormatVersion::V1_0_0);
+
             let object_writer = ParquetObjectWriter::new(store, path);
             let schema = first_record_batch.schema();
-            let mut writer = AsyncArrowWriter::try_new(object_writer, schema, None)?;
+            let mut writer =
+                AsyncArrowWriter::try_new(object_writer, schema, Some(writer_properties))?;
 
             // Write the first batch
             writer.write(&first_record_batch).await?;
@@ -717,7 +740,7 @@ mod tests {
         ));
 
         let write_metadata = parquet_handler
-            .write_parquet(&Url::parse("memory:///data/").unwrap(), data, &[])
+            .write_parquet(&Url::parse("memory:///data/").unwrap(), data, &[], None)
             .await
             .unwrap();
 
@@ -797,7 +820,7 @@ mod tests {
 
         assert_result_error_with_message(
             parquet_handler
-                .write_parquet(&Url::parse("memory:///data").unwrap(), data, &[])
+                .write_parquet(&Url::parse("memory:///data").unwrap(), data, &[], None)
                 .await,
             "Generic delta kernel error: Path must end with a trailing slash: memory:///data",
         );

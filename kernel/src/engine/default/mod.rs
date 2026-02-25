@@ -35,6 +35,7 @@ pub mod file_stream;
 pub mod filesystem;
 pub mod json;
 pub mod parquet;
+pub(crate) mod parquet_properties;
 pub mod stats;
 pub mod storage;
 
@@ -261,6 +262,7 @@ impl<E: TaskExecutor> DefaultEngine<E> {
                 physical_data,
                 physical_partition_values,
                 Some(write_context.stats_columns()),
+                write_context.parquet_format_version(),
             )
             .await
     }

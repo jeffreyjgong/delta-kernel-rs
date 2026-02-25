@@ -94,6 +94,9 @@ fn try_parse(props: &mut TableProperties, k: &str, v: &str) -> Option<()> {
         IN_COMMIT_TIMESTAMP_ENABLEMENT_TIMESTAMP => {
             props.in_commit_timestamp_enablement_timestamp = Some(parse_non_negative(v)?)
         }
+        PARQUET_FORMAT_VERSION => {
+            props.parquet_format_version = ParquetFormatVersion::try_from(v).ok()
+        }
         _ => return None,
     }
     Some(())

@@ -30,6 +30,7 @@ use crate::scan::scan_row_schema;
 use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType, StructTypeBuilder};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::{ColumnMappingMode, TableFeature};
+use crate::table_properties::ParquetFormatVersion;
 use crate::utils::require;
 use crate::FileMeta;
 use crate::{
@@ -914,6 +915,13 @@ impl<S> Transaction<S> {
         // Get stats columns from table configuration
         let stats_columns = self.stats_columns();
 
+        // Get parquet format version from table properties
+        let parquet_format_version = self
+            .read_snapshot
+            .table_properties()
+            .parquet_format_version
+            .unwrap_or_default();
+
         WriteContext::new(
             target_dir.clone(),
             snapshot_schema,
@@ -921,6 +929,7 @@ impl<S> Transaction<S> {
             Arc::new(logical_to_physical),
             column_mapping_mode,
             stats_columns,
+            parquet_format_version,
         )
     }
 
@@ -1214,6 +1223,8 @@ pub struct WriteContext {
     column_mapping_mode: ColumnMappingMode,
     /// Column names that should have statistics collected during writes.
     stats_columns: Vec<ColumnName>,
+    /// The Parquet format version to use when writing data files.
+    parquet_format_version: ParquetFormatVersion,
 }
 
 impl WriteContext {
@@ -1224,6 +1235,7 @@ impl WriteContext {
         logical_to_physical: ExpressionRef,
         column_mapping_mode: ColumnMappingMode,
         stats_columns: Vec<ColumnName>,
+        parquet_format_version: ParquetFormatVersion,
     ) -> Self {
         WriteContext {
             target_dir,
@@ -1232,6 +1244,7 @@ impl WriteContext {
             logical_to_physical,
             column_mapping_mode,
             stats_columns,
+            parquet_format_version,
         }
     }
 
@@ -1261,6 +1274,14 @@ impl WriteContext {
     /// Based on table configuration (dataSkippingNumIndexedCols, dataSkippingStatsColumns).
     pub fn stats_columns(&self) -> &[ColumnName] {
         &self.stats_columns
+    }
+
+    /// Returns the Parquet format version to use when writing data files.
+    ///
+    /// This is determined by the `delta.parquet.format.version` table property.
+    /// Defaults to V1_0_0 for maximum compatibility.
+    pub fn parquet_format_version(&self) -> ParquetFormatVersion {
+        self.parquet_format_version
     }
 
     /// Generate a new unique absolute URL for a deletion vector file.

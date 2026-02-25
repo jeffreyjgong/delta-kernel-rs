@@ -63,6 +63,7 @@ pub(crate) const IN_COMMIT_TIMESTAMP_ENABLEMENT_VERSION: &str =
     "delta.inCommitTimestampEnablementVersion";
 pub(crate) const IN_COMMIT_TIMESTAMP_ENABLEMENT_TIMESTAMP: &str =
     "delta.inCommitTimestampEnablementTimestamp";
+pub(crate) const PARQUET_FORMAT_VERSION: &str = "delta.parquet.format.version";
 
 /// Delta table properties. These are parsed from the 'configuration' map in the most recent
 /// 'Metadata' action of a table.
@@ -216,6 +217,10 @@ pub struct TableProperties {
     /// as the inCommitTimestamp of the commit when this feature was enabled.
     pub in_commit_timestamp_enablement_timestamp: Option<i64>,
 
+    /// The Parquet format version to use when writing data files.
+    /// Version "2.12.0" enables V2 data pages, delta encodings, and INT64 timestamps.
+    pub parquet_format_version: Option<ParquetFormatVersion>,
+
     /// any unrecognized properties are passed through and ignored by the parser
     pub unknown_properties: HashMap<String, String>,
 }
@@ -304,6 +309,39 @@ pub enum CheckpointPolicy {
     V2,
 }
 
+/// The Parquet format version to use when writing data files.
+///
+/// This controls which Parquet features are used during writes:
+/// - `V1_0_0`: Parquet V1 format (default, maximum compatibility)
+/// - `V2_12_0`: Parquet V2 format with delta encodings, DataPageV2 headers, and INT64 timestamps
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum ParquetFormatVersion {
+    /// Parquet V1 format (1.0.0) - default, maximum compatibility
+    #[default]
+    V1_0_0,
+    /// Parquet V2 format (2.12.0) with delta encodings, DataPageV2 headers, INT64 timestamps
+    V2_12_0,
+}
+
+impl ParquetFormatVersion {
+    /// Returns whether this version uses Parquet V2 features
+    pub fn is_v2(&self) -> bool {
+        matches!(self, Self::V2_12_0)
+    }
+}
+
+impl TryFrom<&str> for ParquetFormatVersion {
+    type Error = ();
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "1.0.0" => Ok(Self::V1_0_0),
+            "2.12.0" => Ok(Self::V2_12_0),
+            _ => Err(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +420,46 @@ mod tests {
             IN_COMMIT_TIMESTAMP_ENABLEMENT_TIMESTAMP,
             "delta.inCommitTimestampEnablementTimestamp"
         );
+        assert_eq!(PARQUET_FORMAT_VERSION, "delta.parquet.format.version");
+    }
+
+    #[test]
+    fn test_parse_parquet_format_version() {
+        // Test V1.0.0
+        let properties =
+            HashMap::from([(PARQUET_FORMAT_VERSION.to_string(), "1.0.0".to_string())]);
+        let table_properties = TableProperties::from(properties.iter());
+        assert_eq!(
+            table_properties.parquet_format_version,
+            Some(ParquetFormatVersion::V1_0_0)
+        );
+
+        // Test V2.12.0
+        let properties =
+            HashMap::from([(PARQUET_FORMAT_VERSION.to_string(), "2.12.0".to_string())]);
+        let table_properties = TableProperties::from(properties.iter());
+        assert_eq!(
+            table_properties.parquet_format_version,
+            Some(ParquetFormatVersion::V2_12_0)
+        );
+
+        // Test unknown version - property is recognized but value parsing fails,
+        // resulting in None (consistent with ISOLATION_LEVEL, COLUMN_MAPPING_MODE behavior)
+        let properties =
+            HashMap::from([(PARQUET_FORMAT_VERSION.to_string(), "3.0.0".to_string())]);
+        let table_properties = TableProperties::from(properties.iter());
+        assert_eq!(table_properties.parquet_format_version, None);
+    }
+
+    #[test]
+    fn test_parquet_format_version_is_v2() {
+        assert!(!ParquetFormatVersion::V1_0_0.is_v2());
+        assert!(ParquetFormatVersion::V2_12_0.is_v2());
+    }
+
+    #[test]
+    fn test_parquet_format_version_default() {
+        assert_eq!(ParquetFormatVersion::default(), ParquetFormatVersion::V1_0_0);
     }
 
     #[test]
@@ -525,6 +603,7 @@ mod tests {
             enable_in_commit_timestamps: Some(true),
             in_commit_timestamp_enablement_version: Some(15),
             in_commit_timestamp_enablement_timestamp: Some(1_612_345_678),
+            parquet_format_version: None,
             unknown_properties: HashMap::new(),
         };
         assert_eq!(actual, expected);
